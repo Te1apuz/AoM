@@ -4,16 +4,16 @@
 
 **Goal:** По 4 буквам созвездий артефакта и выбранному типу бот отвечает двумя блоками: герои по совпадению букв (4/3/2) и герои под перековку.
 
-**Architecture:** Пакет `bot/aom_bot/` в репо форка. Чистые модули: разбор xlsx (`heroes.py`), подбор (`picker.py`), текст и кнопки (`render.py`). Отдельно источник данных с кэшем (`source.py`) и Telegram-обвязка на long polling (`app.py`). Шаг 1 (распознавание, сейчас спайк `collector_bot.py`) подключится позже через `Bot.offer_types(...)`. До этого буквы можно прислать текстом.
+**Architecture:** Пакет `bot/aom_bot/` в репо форка. Чистые модули: разбор xlsx (`heroes.py`), подбор (`picker.py`), текст и кнопки (`render.py`). Отдельно источник данных с кэшем (`source.py`) и Telegram-обвязка на long polling (`app.py`). **Один бот** (решение пользователя): распознаватель из спайка шага 1 переносится в `recognition.py` (Task 6). Порядок для игрока такой: скриншот → бот показывает распознанные буквы → кнопки типа → герои. Буквы текстом остаются запасным вводом.
 
-**Tech Stack:** Python 3.15, только стандартная библиотека (`zipfile`, `xml.etree`, `urllib`, `unittest`) — как в спайке шага 1.
+**Tech Stack:** Python 3.15. Ядро (Task 1–5) — только стандартная библиотека (`zipfile`, `xml.etree`, `urllib`, `unittest`). Распознавание (Task 6) — `opencv-python-headless` и `numpy` в `bot/.venv`, как в спайке.
 
 **Spec:** `docs/superpowers/specs/2026-10-25-hero-picker-design.md`
 
 ## Global Constraints
 
 - Код — в `bot/` этого репо (ветка `worktree-hero-picker-design`); тесты — `bot/tests/`, запуск из корня репо: `python3 -m unittest discover -s bot/tests -t bot -v`.
-- Без сторонних зависимостей.
+- Без сторонних зависимостей в ядре; `cv2`/`numpy` импортирует только `recognition.py`, и его тесты пропускаются (`skipUnless`), если `cv2` не установлен.
 - Источник: `https://docs.google.com/spreadsheets/d/18IWMCIs8q2usE4HzB9enjbVJ6C1YLw50/export?format=xlsx`, лист «Таблица», герои с 6-й строки.
 - Цвета навыков — точное сравнение ARGB: `FF00FF00` массовая, `FFFF9900` одиночная.
 - Совпадение — пересечение мультимножеств букв.
@@ -322,7 +322,7 @@ def test_zero_heroes_is_failure(self):          # xlsx без героев (make
   - `class TelegramApi(token: str)` с методом `call(method: str, **params) -> Any` (POST JSON body, `ok=false` → `TelegramError`)
   - `class Bot(api, source: HeroSource, admin_ids: frozenset[int], rng_factory: Callable[[], random.Random] = random.Random, max_sessions: int = 1000)` с методами:
     - `handle_update(upd: dict) -> None`
-    - `offer_types(chat_id: int, letters: Sequence[str], reply_to: int | None = None) -> None` — **точка подключения шага 1**
+    - `offer_types(chat_id: int, letters: Sequence[str], reply_to: int | None = None) -> None` — вызывается после распознавания (Task 6) и при вводе букв текстом
   - `run(bot: Bot, api: TelegramApi) -> None` — цикл `getUpdates` как в спайке, ошибки одного апдейта логируются и не роняют цикл.
   - `python3 -m aom_bot <token_file> <cache_dir>` (запуск из `bot/`); админы из `AOM_ADMIN_IDS`.
 
@@ -378,11 +378,41 @@ def test_other_text_gets_help(self):              # "привет" → HELP
 
 - [ ] **Step 5: Commit** `git commit -m "bot: telegram wiring for hero picker"`
 
-### Task 6: Живая проверка
+### Task 6: Распознавание в том же боте
+
+**Files:**
+- Create: `bot/aom_bot/recognition.py`, `bot/aom_bot/data/ingame_refs.pkl`, `bot/requirements.txt`, `bot/tests/test_recognition.py`, `bot/tests/data/screens/` (3 скриншота из `/Users/den/prj/aom/example/artefact/`)
+- Modify: `bot/aom_bot/app.py`, `bot/aom_bot/__main__.py`, `bot/tests/test_app.py`, `bot/README.md`
+
+**Interfaces:**
+- Consumes: `Bot.offer_types`, `TelegramApi` (Task 5).
+- Produces:
+  - `class Recognizer(runes_dir: Path, ingame_refs: Path | None)` с методами `letters(image_path: Path) -> tuple[str, str, str, str] | None` (без суффикса `(dim)`, слева направо) и `strip_png(letters: Sequence[str]) -> bytes` (картинка 4 значков из `Runes/` с буквами под ними, как в спайке).
+  - `Bot(..., recognizer: Recognizer | None = None, save_dir: Path | None = None)`: фото или картинка-документ в сообщении → скачать → `recognizer.letters`. Если `None` — ответ `NOT_FOUND` («Не нашёл 4 значка созвездий. Пришли скриншот карточки артефакта, лучше файлом (без сжатия).»). Иначе — `sendPhoto` с картинкой значков и подписью `«Созвездия артефакта: L G E B»`, затем `offer_types(chat, letters, reply_to=message_id)`.
+  - Если задан `save_dir`, скриншот и строка в `log.jsonl` сохраняются, как в спайке (поля `file`, `user`, `kind`, `recognized`).
+  - `python3 -m aom_bot <token_file> <cache_dir> [--runes DIR] [--refs FILE] [--save DIR]`; без `--runes` бот работает только с буквами текстом.
+
+- [ ] **Step 1: Окружение.** `python3 -m venv bot/.venv && bot/.venv/bin/pip install opencv-python-headless numpy`, затем `pip freeze` с `opencv`/`numpy` → `bot/requirements.txt`. В `.gitignore` добавить `bot/.venv/` и `.superpowers/`.
+- [ ] **Step 2: Написать падающие тесты.**
+  - `test_recognition.py`: `Recognizer(REPO/"Runes", DATA/"ingame_refs.pkl").letters(...)` на трёх скриншотах. Сравнение мультимножеством, как в спайке: `photo_2026-10-25_10-16-41.jpg` → `HLJK`, `photo_2026-10-25_10-16-41 (2).jpg` → `BDDH`, `photo_2026-10-25_10-16-42.jpg` → `KLDB`. `letters(картинка без значков)` → `None`. `strip_png("LGEB")` начинается с PNG-сигнатуры.
+  - `test_app.py`: `FakeRecognizer` возвращает `("H","L","J","K")` или `None`; `FakeApi.getFile` и скачивание подменяются.
+    - Фото → по порядку `sendPhoto` (подпись `«Созвездия артефакта: H L J K»`), затем `sendMessage` с `format_type_prompt("HLJK")` и `keyboard(None)`.
+    - `None` → `NOT_FOUND`.
+    - С `save_dir` появляется строка в `log.jsonl`.
+- [ ] **Step 3: Запустить** `bot/.venv/bin/python -m unittest discover -s bot/tests -t bot -v` — новые тесты FAIL.
+- [ ] **Step 4: Реализовать.**
+  - Перенести `recognize2.py` из `/Users/den/.claude/jobs/7ba0ece8/tmp/spike/` в `recognition.py` без изменения алгоритма. Глобальные `HEX`/`INGAME` становятся полями `Recognizer`; отладочный вывод и `__main__` убрать.
+  - `ingame_refs.pkl` скопировать в `bot/aom_bot/data/`.
+  - `strip_png` — функция `runes_strip` из `collector_bot.py`.
+  - Скачивание файла по `getFile` и `sendPhoto` multipart — из `collector_bot.py`, методами `TelegramApi`.
+- [ ] **Step 5: Запустить** — PASS (весь набор под `bot/.venv`, а ядро — ещё и системным `python3`, где тесты распознавания пропускаются).
+- [ ] **Step 6: Commit** `git commit -m "bot: recognition and picker in one bot"`
+
+### Task 7: Живая проверка
 
 **Files:** нет новых.
 
-- [ ] **Step 1: Остановить спайк-бот шага 1.** Он слушает тот же токен, а два `getUpdates` на одном токене дают 409 Conflict. **Перед остановкой спросить пользователя:** спайк собирает скриншоты для проверки распознавания.
-- [ ] **Step 2: Запустить** из `bot/`: `AOM_ADMIN_IDS=<id> python3 -m aom_bot /Users/den/.config/aom-bot/token ~/.cache/aom-bot`. Ожидается лог с именем бота и загрузкой 209+ героев.
-- [ ] **Step 3: Прогнать в Telegram:** `L G E B`, затем «Массовая», «Все 2/4 (50)», потом «Контратака» на том же сообщении. Ответ совпадает по структуре с примером из спеки.
-- [ ] **Step 4: Вернуть спайк-бот** (или оставить новый — по решению пользователя) и записать результат проверки в README.
+- [ ] **Step 1: Остановить спайк-бот шага 1.** Он слушает тот же токен, а два `getUpdates` на одном токене дают 409 Conflict. Объединённый бот заменяет его, включая сохранение скриншотов. **Перед остановкой спросить пользователя:** спайк принадлежит другой сессии.
+- [ ] **Step 2: Запустить** из `bot/`: `AOM_ADMIN_IDS=<id> .venv/bin/python -m aom_bot /Users/den/.config/aom-bot/token ~/.cache/aom-bot --runes ../Runes --refs aom_bot/data/ingame_refs.pkl --save /Users/den/prj/aom/example/incoming`. Ожидается лог с именем бота и загрузкой 209+ героев.
+- [ ] **Step 3: Прогнать в Telegram.** Скриншот артефакта → картинка значков с буквами → кнопки типа → «Массовая» → «Все 2/4 (N)» → «Контратака» на том же сообщении. Отдельно проверить ввод `L G E B` текстом.
+- [ ] **Step 4: Записать результат проверки в README.**
