@@ -19,6 +19,12 @@ def hero_line(h: Hero) -> str:
     return f"{h.name} ({' '.join(h.letters)})"
 
 
+def format_recognized(letters: Sequence[str]) -> str:
+    """Caption under the recognized constellations; recognition has no confidence gate, so offer a way out."""
+    return (f"Созвездия артефакта: {' '.join(letters)}\n"
+            "Если буквы неверны — пришли их текстом, например L G E B.")
+
+
 def format_type_prompt(letters: Sequence[str]) -> str:
     return f"Артефакт: {' '.join(letters)}\nВыбери тип артефакта по его главному свойству:"
 

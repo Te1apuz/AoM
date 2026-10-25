@@ -193,7 +193,7 @@ class RecognitionFlowTest(unittest.TestCase):
         methods = [m for m, _ in self.api.calls]
         self.assertLess(methods.index("sendPhoto"), methods.index("sendMessage"))  # сначала распознавание
         photo = self.api.sent("sendPhoto")[0]
-        self.assertEqual((photo["caption"], photo["png"], photo["reply_to_message_id"]),
+        self.assertEqual((photo["caption"].split("\n")[0], photo["png"], photo["reply_to_message_id"]),
                          ("Созвездия артефакта: H L J K", b"\x89PNG strip HLJK", 10))
         prompt = self.api.sent("sendMessage")[-1]
         self.assertEqual((prompt["text"], prompt["reply_markup"]), (format_type_prompt("HLJK"), keyboard(None)))
@@ -209,6 +209,23 @@ class RecognitionFlowTest(unittest.TestCase):
         bot = self.make_bot(("H", "L", "J", "K"))
         bot.handle_update(file_msg(mime="application/pdf"))
         self.assertEqual(self.api.sent("sendMessage")[-1]["text"], HELP)
+
+    def test_caption_tells_how_to_fix_wrong_letters(self):
+        bot = self.make_bot(("H", "L", "J", "K"))
+        bot.handle_update(photo_msg())
+        self.assertIn("пришли их текстом", self.api.sent("sendPhoto")[0]["caption"])
+
+    def test_recognizer_crash_still_answers(self):
+        bot = self.make_bot(None)
+        self.rec.letters = lambda path: (_ for _ in ()).throw(ValueError("boom"))
+        bot.handle_update(photo_msg())  # не бросает
+        self.assertEqual(self.api.sent("sendMessage")[-1]["text"], NOT_FOUND)
+
+    def test_download_failure_still_answers(self):
+        bot = self.make_bot(("H", "L", "J", "K"))
+        self.api.fail("getFile", TelegramError("Bad Request: file is too big"))
+        bot.handle_update(photo_msg())
+        self.assertEqual(self.api.sent("sendMessage")[-1]["text"], NOT_FOUND)
 
     def test_not_found(self):
         bot = self.make_bot(None)

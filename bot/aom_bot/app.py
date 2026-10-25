@@ -15,8 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from .picker import ArtType, PickResult, parse_letters, pick
-from .render import (HELP, NOT_ADMIN, NOT_FOUND, SESSION_GONE, UNAVAILABLE, format_pick, format_tier_full,
-                     format_type_prompt, keyboard)
+from .render import (HELP, NOT_ADMIN, NOT_FOUND, SESSION_GONE, UNAVAILABLE, format_pick, format_recognized,
+                     format_tier_full, format_type_prompt, keyboard)
 from .source import HeroSource, SourceUnavailable
 
 log = logging.getLogger(__name__)
@@ -121,6 +121,24 @@ class Bot:
 
     def _recognize(self, msg: dict, file_id: str, kind: str) -> None:
         chat, message_id = msg["chat"]["id"], msg["message_id"]
+        try:
+            letters = self._read_letters(msg, file_id, kind)
+        except Exception:  # too big for getFile, download error, recognizer crash: the player still gets an answer
+            log.exception("recognition failed for message %s", message_id)
+            letters = None
+        log.info("[%s] recognized %s", kind, letters)
+        if not letters:
+            self.api.call("sendMessage", chat_id=chat, text=NOT_FOUND, reply_to_message_id=message_id)
+            return
+        try:
+            self.api.send_photo(chat, self.recognizer.strip_png(letters), format_recognized(letters),
+                                reply_to=message_id)
+        except Exception:  # the type buttons matter more than the picture
+            log.exception("sending the constellation strip failed")
+        self.offer_types(chat, letters)
+
+    def _read_letters(self, msg: dict, file_id: str, kind: str) -> tuple[str, ...] | None:
+        message_id = msg["message_id"]
         file_path = self.api.call("getFile", file_id=file_id)["file_path"]
         data = self.api.download(file_path)
         ext = Path(file_path).suffix or ".jpg"
@@ -139,13 +157,7 @@ class Bot:
                 image_path = Path(d) / f"screen{ext}"
                 image_path.write_bytes(data)
                 letters = self.recognizer.letters(image_path)
-        log.info("[%s] recognized %s", kind, letters)
-        if not letters:
-            self.api.call("sendMessage", chat_id=chat, text=NOT_FOUND, reply_to_message_id=message_id)
-            return
-        self.api.send_photo(chat, self.recognizer.strip_png(letters),
-                            f"Созвездия артефакта: {' '.join(letters)}", reply_to=message_id)
-        self.offer_types(chat, letters)
+        return letters
 
     def _refresh(self, chat: int, user_id: int | None) -> None:
         if user_id not in self.admin_ids:

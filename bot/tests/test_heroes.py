@@ -52,5 +52,19 @@ class ParseHeroesTest(unittest.TestCase):
         self.assertIn("FF123456", warnings[0])
 
 
+class ThemeColorTest(unittest.TestCase):
+    def test_theme_fill_is_warned(self):  # спека: theme-цвет в N–Q → предупреждение с именем героя
+        xlsx = make_xlsx({
+            6: {"C": ("Тематик", None), "F": ("A", None), "H": ("B", None), "J": ("C", None), "L": ("D", None),
+                "N": ("", "theme:4"), "R": ("", "indexed:10")},
+        })
+        heroes, warnings = parse_heroes(xlsx)
+        self.assertEqual(heroes[0].skills, (None, None, None, None))
+        self.assertTrue(heroes[0].own_counter)  # любая заливка в R–U считается
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("Тематик", warnings[0])
+        self.assertIn("theme:4", warnings[0])
+
+
 if __name__ == "__main__":
     unittest.main()

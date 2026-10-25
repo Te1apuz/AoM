@@ -75,7 +75,10 @@ class Recognizer:
         img = cv2.imread(str(image_path))
         if img is None:
             return None
-        rows = self._find_rows(img)
+        h_img, w_img = img.shape[:2]
+        # the brightness-profile path can place a slot past the image edge (tightly cropped screenshots)
+        rows = [row for row in self._find_rows(img)
+                if all(x >= 0 and y >= 0 and x + w <= w_img and y + h <= h_img for x, y, w, h in row)]
         if not rows:
             return None
         # pick the row whose 4 slots look most like constellation glyphs (tiles/portraits score low)

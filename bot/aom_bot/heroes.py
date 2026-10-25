@@ -114,12 +114,19 @@ def _shared_strings(z: zipfile.ZipFile) -> list[str]:
 
 
 def _cell_fills(z: zipfile.ZipFile) -> list[str | None]:
-    """Fill ARGB per cell style index (cellXfs)."""
+    """Fill per cell style index (cellXfs): ARGB, or "theme:N" / "indexed:N" for non-rgb colours."""
     styles = ET.fromstring(z.read("xl/styles.xml"))
     fills = []
     for f in styles.find(M + "fills"):
-        fg = f.find(f"{M}patternFill/{M}fgColor")
-        fills.append(fg.get("rgb") if fg is not None else None)
+        pattern = f.find(M + "patternFill")
+        fg = pattern.find(M + "fgColor") if pattern is not None else None
+        if fg is None or pattern.get("patternType", "none") == "none":
+            fills.append(None)
+        elif fg.get("rgb"):
+            fills.append(fg.get("rgb"))
+        else:  # a theme/indexed colour must not pass for "no fill": it gets the unknown-colour warning
+            kind = next((k for k in ("theme", "indexed", "auto") if fg.get(k) is not None), "color")
+            fills.append(f"{kind}:{fg.get(kind, '?')}")
     return [fills[int(xf.get("fillId", 0))] for xf in styles.find(M + "cellXfs")]
 
 

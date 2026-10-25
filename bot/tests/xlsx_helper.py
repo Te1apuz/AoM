@@ -7,8 +7,14 @@ NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
 REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 
 
+def _color_attr(fill: str) -> str:
+    """'FF00FF00' -> rgb="FF00FF00"; 'theme:4' / 'indexed:10' -> theme="4" / indexed="10"."""
+    kind, sep, value = fill.partition(":")
+    return f'{kind}="{value}"' if sep else f'rgb="{fill}"'
+
+
 def make_xlsx(rows: dict[int, dict[str, tuple[str, str | None]]]) -> bytes:
-    """rows: row number -> column letter -> (text, fill ARGB or None)."""
+    """rows: row number -> column letter -> (text, fill ARGB / 'theme:N' / 'indexed:N' or None)."""
     fills = [None]
     for cols in rows.values():
         for _, fill in cols.values():
@@ -16,7 +22,8 @@ def make_xlsx(rows: dict[int, dict[str, tuple[str, str | None]]]) -> bytes:
                 fills.append(fill)
     fill_xml = ['<fill><patternFill patternType="none"/></fill>',
                 '<fill><patternFill patternType="gray125"/></fill>']
-    fill_xml += [f'<fill><patternFill patternType="solid"><fgColor rgb="{f}"/></patternFill></fill>' for f in fills[1:]]
+    fill_xml += [f'<fill><patternFill patternType="solid"><fgColor {_color_attr(f)}/></patternFill></fill>'
+                 for f in fills[1:]]
     # style 0 -> no fill; style i -> fillId i+1 (ids 0/1 are the mandatory none/gray125)
     xfs = ['<xf fillId="0"/>'] + [f'<xf fillId="{i + 1}"/>' for i in range(1, len(fills))]
     styles = (f'<styleSheet xmlns="{NS}"><fills count="{len(fill_xml)}">{"".join(fill_xml)}</fills>'

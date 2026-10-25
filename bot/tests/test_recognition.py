@@ -43,6 +43,14 @@ class RecognizerTest(unittest.TestCase):
             cv2.imwrite(str(p), np.zeros((600, 1200, 3), np.uint8))
             self.assertIsNone(self.rec.letters(p))
 
+    def test_tight_crop_does_not_crash(self):  # icon boxes may run past the image edge
+        img = cv2.imread(str(SCREENS / "photo_2026-10-25_10-16-42.jpg"))
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "tight.png"
+            cv2.imwrite(str(p), img[577:626, 418:587])  # exactly the icon row, no padding
+            got = self.rec.letters(p)
+        self.assertTrue(got is None or Counter(got) == Counter("KLDB"), got)
+
     def test_strip_png(self):
         self.assertTrue(self.rec.strip_png("LGEB").startswith(b"\x89PNG"))
 
