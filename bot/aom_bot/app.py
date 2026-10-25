@@ -1,16 +1,21 @@
-"""Telegram bot: artifact letters -> type buttons -> picked heroes. Long polling, stdlib only."""
+"""Telegram bot: screenshot -> recognized letters -> type buttons -> picked heroes. Long polling.
+
+Stdlib only; OpenCV is needed only by the recognizer passed in from __main__.
+"""
 import json
 import logging
 import random
+import tempfile
 import time
 import urllib.error
 import urllib.request
 from collections import OrderedDict
 from collections.abc import Callable, Sequence
+from pathlib import Path
 from typing import Any
 
 from .picker import ArtType, PickResult, parse_letters, pick
-from .render import (HELP, NOT_ADMIN, SESSION_GONE, UNAVAILABLE, format_pick, format_tier_full,
+from .render import (HELP, NOT_ADMIN, NOT_FOUND, SESSION_GONE, UNAVAILABLE, format_pick, format_tier_full,
                      format_type_prompt, keyboard)
 from .source import HeroSource, SourceUnavailable
 
@@ -26,10 +31,32 @@ class TelegramError(RuntimeError):
 class TelegramApi:
     def __init__(self, token: str):
         self.base = f"https://api.telegram.org/bot{token}/"
+        self.file_base = f"https://api.telegram.org/file/bot{token}/"
 
     def call(self, method: str, **params) -> Any:
-        req = urllib.request.Request(self.base + method, data=json.dumps(params).encode(),
-                                     headers={"Content-Type": "application/json"})
+        return self._send(urllib.request.Request(self.base + method, data=json.dumps(params).encode(),
+                                                 headers={"Content-Type": "application/json"}))
+
+    def download(self, file_path: str) -> bytes:
+        with urllib.request.urlopen(self.file_base + file_path, timeout=70) as r:
+            return r.read()
+
+    def send_photo(self, chat_id: int, png: bytes, caption: str, reply_to: int | None = None) -> Any:
+        """sendPhoto with an in-memory PNG (multipart)."""
+        boundary = "----aom" + str(time.time_ns())
+        fields = {"chat_id": chat_id, "caption": caption}
+        if reply_to is not None:
+            fields["reply_to_message_id"] = reply_to
+        parts = [f'--{boundary}\r\nContent-Disposition: form-data; name="{k}"\r\n\r\n{v}\r\n'.encode()
+                 for k, v in fields.items()]
+        parts.append(f'--{boundary}\r\nContent-Disposition: form-data; name="photo"; filename="runes.png"\r\n'
+                     f'Content-Type: image/png\r\n\r\n'.encode() + png + b"\r\n")
+        parts.append(f"--{boundary}--\r\n".encode())
+        return self._send(urllib.request.Request(
+            self.base + "sendPhoto", data=b"".join(parts),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}))
+
+    def _send(self, req: urllib.request.Request) -> Any:
         try:
             with urllib.request.urlopen(req, timeout=70) as r:
                 res = json.load(r)
@@ -42,12 +69,15 @@ class TelegramApi:
 
 class Bot:
     def __init__(self, api, source: HeroSource, admin_ids: frozenset[int],
-                 rng_factory: Callable[[], random.Random] = random.Random, max_sessions: int = 1000):
+                 rng_factory: Callable[[], random.Random] = random.Random, max_sessions: int = 1000,
+                 recognizer=None, save_dir: Path | None = None):
         self.api = api
         self.source = source
         self.admin_ids = admin_ids
         self.rng_factory = rng_factory
         self.max_sessions = max_sessions
+        self.recognizer = recognizer  # recognition.Recognizer; None -> letters as text only
+        self.save_dir = Path(save_dir) if save_dir else None
         # (chat_id, message_id) of the bot's prompt -> (letters, last pick or None)
         self.sessions: OrderedDict[tuple[int, int], tuple[tuple[str, ...], PickResult | None]] = OrderedDict()
 
@@ -66,6 +96,10 @@ class Bot:
 
     def _on_message(self, msg: dict) -> None:
         chat = msg["chat"]["id"]
+        image = self._image_of(msg)
+        if image and self.recognizer:
+            self._recognize(msg, *image)
+            return
         text = msg.get("text", "").strip()
         if text.startswith("/refresh"):
             self._refresh(chat, msg.get("from", {}).get("id"))
@@ -75,6 +109,43 @@ class Bot:
             self.offer_types(chat, letters, reply_to=msg["message_id"])
         else:
             self.api.call("sendMessage", chat_id=chat, text=HELP)
+
+    @staticmethod
+    def _image_of(msg: dict) -> tuple[str, str] | None:
+        """(file_id, kind) of the screenshot in the message, if any."""
+        if msg.get("photo"):
+            return msg["photo"][-1]["file_id"], "photo"  # largest size Telegram kept
+        if msg.get("document", {}).get("mime_type", "").startswith("image/"):
+            return msg["document"]["file_id"], "file"  # sent as file: original, uncompressed
+        return None
+
+    def _recognize(self, msg: dict, file_id: str, kind: str) -> None:
+        chat, message_id = msg["chat"]["id"], msg["message_id"]
+        file_path = self.api.call("getFile", file_id=file_id)["file_path"]
+        data = self.api.download(file_path)
+        ext = Path(file_path).suffix or ".jpg"
+        if self.save_dir:
+            user = msg.get("from", {})
+            name = f"{time.strftime('%Y%m%d-%H%M%S')}_{user.get('id')}_{message_id}_{kind}{ext}"
+            self.save_dir.mkdir(parents=True, exist_ok=True)
+            image_path = self.save_dir / name
+            image_path.write_bytes(data)
+            letters = self.recognizer.letters(image_path)
+            with open(self.save_dir / "log.jsonl", "a") as f:
+                f.write(json.dumps({"file": name, "user": user.get("username") or user.get("id"), "kind": kind,
+                                    "recognized": "".join(letters) if letters else None}, ensure_ascii=False) + "\n")
+        else:
+            with tempfile.TemporaryDirectory() as d:
+                image_path = Path(d) / f"screen{ext}"
+                image_path.write_bytes(data)
+                letters = self.recognizer.letters(image_path)
+        log.info("[%s] recognized %s", kind, letters)
+        if not letters:
+            self.api.call("sendMessage", chat_id=chat, text=NOT_FOUND, reply_to_message_id=message_id)
+            return
+        self.api.send_photo(chat, self.recognizer.strip_png(letters),
+                            f"Созвездия артефакта: {' '.join(letters)}", reply_to=message_id)
+        self.offer_types(chat, letters)
 
     def _refresh(self, chat: int, user_id: int | None) -> None:
         if user_id not in self.admin_ids:

@@ -18,15 +18,32 @@ Telegram-бот для Age of Magic: распознаёт созвездия а�
 
 ## Запуск
 
+Один раз: окружение для распознавания (OpenCV):
+
+```sh
+python3 -m venv bot/.venv && bot/.venv/bin/pip install -r bot/requirements.txt
+```
+
 Из папки `bot/`:
 
 ```sh
-AOM_ADMIN_IDS=123456789 python3 -m aom_bot ~/.config/aom-bot/token ~/.cache/aom-bot
+AOM_ADMIN_IDS=123456789 .venv/bin/python -m aom_bot ~/.config/aom-bot/token ~/.cache/aom-bot \
+  --runes ../Runes --refs aom_bot/data/ingame_refs.pkl --save /Users/den/prj/aom/example/incoming
 ```
 
 - `token_file` — файл с токеном бота (не коммитить).
 - `cache_dir` — сюда сохраняется последняя загруженная таблица
   (`heroes.xlsx`); если Google недоступен, бот отвечает по ней с пометкой даты.
+- `--runes` — значки созвездий из этого репо; включает распознавание
+  скриншотов. Без него бот принимает только буквы текстом (и работает на
+  системном `python3` без OpenCV).
+- `--refs` — эталонные вырезки значков из игры (`ingame_refs.pkl`, из спайка
+  распознавания); с ними распознавание точнее.
+- `--save` — сохранять присланные скриншоты и `log.jsonl` (для проверки
+  распознавания).
+
+Распознаватель (`aom_bot/recognition.py`) перенесён из спайка шага 1
+(`recognize2.py`) без изменения алгоритма.
 
 ## Данные
 
@@ -40,5 +57,6 @@ AOM_ADMIN_IDS=123456789 python3 -m aom_bot ~/.config/aom-bot/token ~/.cache/aom-
 Из корня репо:
 
 ```sh
-python3 -m unittest discover -s bot/tests -t bot -v
+bot/.venv/bin/python -m unittest discover -s bot/tests -t bot -v   # всё, включая распознавание
+python3 -m unittest discover -s bot/tests -t bot -v                # ядро; тесты распознавания пропускаются
 ```

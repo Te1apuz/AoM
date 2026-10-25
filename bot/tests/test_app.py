@@ -5,7 +5,7 @@ from pathlib import Path
 
 from aom_bot.app import Bot, TelegramError
 from aom_bot.heroes import parse_heroes
-from aom_bot.render import HELP, NOT_ADMIN, SESSION_GONE, UNAVAILABLE, format_type_prompt, keyboard
+from aom_bot.render import HELP, NOT_ADMIN, NOT_FOUND, SESSION_GONE, UNAVAILABLE, format_type_prompt, keyboard
 from aom_bot.source import Snapshot, SourceUnavailable
 
 HEROES = parse_heroes((Path(__file__).parent / "data" / "heroes-2026-10-25.xlsx").read_bytes())[0]
@@ -19,6 +19,14 @@ class FakeApi:
         self.failures = {}
         self.next_id = 1
 
+    def download(self, file_path):
+        self.calls.append(("download", {"file_path": file_path}))
+        return b"fake image bytes"
+
+    def send_photo(self, chat_id, png, caption, reply_to=None):
+        self.calls.append(("sendPhoto", {"chat_id": chat_id, "png": png, "caption": caption,
+                                         "reply_to_message_id": reply_to}))
+
     def fail(self, method, exc):
         self.failures[method] = exc
 
@@ -29,6 +37,8 @@ class FakeApi:
         if method == "sendMessage":
             self.next_id += 1
             return {"message_id": self.next_id - 1}
+        if method == "getFile":
+            return {"file_path": f"photos/{params['file_id']}.jpg"}
         return True
 
     def sent(self, method):
@@ -140,6 +150,86 @@ class BotTest(unittest.TestCase):
             bot.handle_update(msg("LGEB"))
         bot.handle_update(cb("t:mass", message_id=1))  # самая старая вытеснена
         self.assertEqual(self.api.calls[-1][1].get("text"), SESSION_GONE)
+
+
+class FakeRecognizer:
+    def __init__(self, result):
+        self.result = result
+        self.paths = []
+
+    def letters(self, image_path):
+        self.paths.append(Path(image_path))
+        self.seen_bytes = Path(image_path).read_bytes()
+        return self.result
+
+    def strip_png(self, letters):
+        return b"\x89PNG strip " + "".join(letters).encode()
+
+
+def photo_msg(chat=5, user=ADMIN, message_id=10):
+    return {"message": {"message_id": message_id, "chat": {"id": chat}, "from": {"id": user, "username": "tester"},
+                        "photo": [{"file_id": "small"}, {"file_id": "big"}]}}
+
+
+def file_msg(mime="image/jpeg", chat=5, message_id=11):
+    return {"message": {"message_id": message_id, "chat": {"id": chat}, "from": {"id": ADMIN},
+                        "document": {"file_id": "doc", "mime_type": mime}}}
+
+
+class RecognitionFlowTest(unittest.TestCase):
+    def setUp(self):
+        self.api = FakeApi()
+
+    def make_bot(self, result, save_dir=None):
+        self.rec = FakeRecognizer(result)
+        return Bot(self.api, FakeSource(), frozenset(), rng_factory=lambda: random.Random(1),
+                   recognizer=self.rec, save_dir=save_dir)
+
+    def test_photo_recognized_then_types_offered(self):
+        bot = self.make_bot(("H", "L", "J", "K"))
+        bot.handle_update(photo_msg())
+        self.assertEqual(self.api.calls[0], ("getFile", {"file_id": "big"}))  # самое крупное фото
+        self.assertEqual(self.rec.seen_bytes, b"fake image bytes")
+        methods = [m for m, _ in self.api.calls]
+        self.assertLess(methods.index("sendPhoto"), methods.index("sendMessage"))  # сначала распознавание
+        photo = self.api.sent("sendPhoto")[0]
+        self.assertEqual((photo["caption"], photo["png"], photo["reply_to_message_id"]),
+                         ("Созвездия артефакта: H L J K", b"\x89PNG strip HLJK", 10))
+        prompt = self.api.sent("sendMessage")[-1]
+        self.assertEqual((prompt["text"], prompt["reply_markup"]), (format_type_prompt("HLJK"), keyboard(None)))
+        bot.handle_update(cb("t:mass", message_id=1))  # кнопки работают и после распознавания
+        self.assertTrue(self.api.sent("editMessageText")[-1]["text"].startswith("Артефакт: H L J K"))
+
+    def test_image_document_is_recognized(self):
+        bot = self.make_bot(("H", "L", "J", "K"))
+        bot.handle_update(file_msg())
+        self.assertEqual(self.api.calls[0], ("getFile", {"file_id": "doc"}))
+
+    def test_non_image_document_gets_help(self):
+        bot = self.make_bot(("H", "L", "J", "K"))
+        bot.handle_update(file_msg(mime="application/pdf"))
+        self.assertEqual(self.api.sent("sendMessage")[-1]["text"], HELP)
+
+    def test_not_found(self):
+        bot = self.make_bot(None)
+        bot.handle_update(photo_msg())
+        self.assertEqual(self.api.sent("sendMessage")[-1]["text"], NOT_FOUND)
+        self.assertEqual(self.api.sent("sendPhoto"), [])
+
+    def test_save_dir_keeps_screens_and_log(self):
+        import json
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            bot = self.make_bot(("H", "L", "J", "K"), save_dir=Path(d))
+            bot.handle_update(photo_msg())
+            entry = json.loads((Path(d) / "log.jsonl").read_text().splitlines()[-1])
+            self.assertEqual((entry["user"], entry["kind"], entry["recognized"]), ("tester", "photo", "HLJK"))
+            self.assertEqual((Path(d) / entry["file"]).read_bytes(), b"fake image bytes")
+
+    def test_without_recognizer_photo_gets_help(self):
+        bot = Bot(self.api, FakeSource(), frozenset())
+        bot.handle_update(photo_msg())
+        self.assertEqual(self.api.sent("sendMessage")[-1]["text"], HELP)
 
 
 if __name__ == "__main__":
